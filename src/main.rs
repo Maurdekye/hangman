@@ -170,11 +170,13 @@ impl Game {
                 continue;
             }
 
-            let Some(positions) = captures.get(2) else {
-                return Ok((letter, vec![]));
-            };
+            let raw_positions = captures.get(2).unwrap();
 
-            let positions: Vec<usize> = positions
+            if raw_positions.is_empty() {
+                return Ok((letter, vec![]));
+            }
+
+            let positions: Vec<usize> = raw_positions
                 .as_str()
                 .trim()
                 .split(" ")
