@@ -125,7 +125,7 @@ impl Game {
                 println!("{word}");
             }
         }
-        
+
         let letter_scores = self.compute_letter_scores(&used);
         
         println!("Top {} guesses:", self.args.num_suggestions);
@@ -221,8 +221,10 @@ impl Game {
 
     fn prune_words(&mut self) -> Vec<Vec<char>> {
         let mut potential_letters = vec![vec![]; self.args.letters as usize];
+        
         self.available_words.retain(|word| {
-            for (potential_letter_list, (word_letter, guess_letter)) in potential_letters
+            let mut potential_additions = vec![vec![]; self.args.letters as usize];
+            for (potential_letter_list, (word_letter, guess_letter)) in potential_additions
                 .iter_mut()
                 .zip(word.chars().zip(self.current_guess.iter()))
             {
@@ -239,6 +241,13 @@ impl Game {
                         if !potential_letter_list.contains(&word_letter) {
                             potential_letter_list.push(word_letter);
                         }
+                    }
+                }
+            }
+            for (addition, potential_letters) in potential_additions.into_iter().zip(potential_letters.iter_mut()) {
+                for add_char in addition {
+                    if !potential_letters.contains(&add_char) {
+                        potential_letters.push(add_char);
                     }
                 }
             }
@@ -299,7 +308,7 @@ struct Args {
         short = 'f',
         long,
         default_value = "./words.txt",
-        help = "Name of the file to cache words in"
+        help = "Name of the file to cache and load words from"
     )]
     words_file: PathBuf,
 
@@ -307,7 +316,7 @@ struct Args {
         short = 's',
         long,
         default_value = "https://www.mit.edu/~ecprice/wordlist.100000",
-        help = "Url to fetch words from if not cached"
+        help = "Url to load words from if not downloaded"
     )]
     word_source: String,
 
