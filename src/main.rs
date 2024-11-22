@@ -104,7 +104,7 @@ impl Game {
             }
         }
         let mut sorted_counts: Vec<_> = counts.into_iter().collect();
-        sorted_counts.sort_unstable_by_key(|(_, c)| *c);
+        sorted_counts.sort_unstable_by(|(_, a), (_, b)| b.cmp(a));
 
         return sorted_counts;
     }
