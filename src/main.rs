@@ -124,17 +124,17 @@ impl Game {
             for word in self.available_words.iter() {
                 println!("{word}");
             }
-        } else {
-            let letter_scores = self.compute_letter_scores(&used);
-            
-            println!("Top {} guesses:", self.args.num_suggestions);
-            for (i, (letter, score)) in letter_scores
-                .into_iter()
-                .take(self.args.num_suggestions as usize)
-                .enumerate()
-            {
-                println!("{}. {letter}: {score}", i + 1);
-            }
+        }
+        
+        let letter_scores = self.compute_letter_scores(&used);
+        
+        println!("Top {} guesses:", self.args.num_suggestions);
+        for (i, (letter, score)) in letter_scores
+            .into_iter()
+            .take(self.args.num_suggestions as usize)
+            .enumerate()
+        {
+            println!("{}. {letter}: {score}", i + 1);
         }
 
         used
