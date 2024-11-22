@@ -306,7 +306,7 @@ struct Args {
     #[clap(
         short = 's',
         long,
-        default_value = "https://www.mit.edu/~ecprice/wordlist.10000",
+        default_value = "https://www.mit.edu/~ecprice/wordlist.100000",
         help = "Url to fetch words from if not cached"
     )]
     word_source: String,
