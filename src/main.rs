@@ -4,7 +4,7 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     error::Error,
     fs::File,
-    io::{stdin, BufRead, BufReader, BufWriter, Write},
+    io::{stdin, stdout, BufRead, BufReader, BufWriter, Write},
     path::PathBuf,
 };
 
@@ -50,7 +50,6 @@ impl Game {
         Ok(Game {
             guess_pattern: Regex::new(r"^([a-z])(( [0-9]+)*)$")?,
             available_words: words
-                .clone()
                 .into_iter()
                 .filter(|word| word.len() == letters)
                 .collect(),
@@ -142,12 +141,13 @@ impl Game {
 
     fn read_guess(&self, used: &[char]) -> Result<(char, Vec<usize>), Err> {
         let letters = self.args.letters as usize;
-        const HELPTEXT: &str = "Type your guess in the following format: <letter> [list of positions the letter appears in separated by spaces, or nothing if the letter is not present in the word]
-        example 1: the letter n appears at the start of the word: type `n 1`
-        example 2: the letter e appears as the second and fourth letter: type `e 2 4`
-        example 3: the letter g does not appear in the word: type `g`";
+        const HELPTEXT: &str = "Type your guess in the following format: <letter> [positions]
+example 1: the letter n appears at the start of the word: type `n 1`
+example 2: the letter e appears as the second and fourth letter: type `e 2 4`
+example 3: the letter g does not appear in the word: type `g`";
         loop {
-            println!("Type the letter you guessed, and if/where it appears in the word (hit enter for help): ");
+            print!("Type the letter you guessed, and if/where it appears in the word (hit enter for help): ");
+            stdout().flush()?;
             let mut guess_raw = String::new();
             stdin().read_line(&mut guess_raw)?;
             guess_raw = guess_raw.trim().to_string();
@@ -190,10 +190,9 @@ impl Game {
 
             let positions: Vec<_> = positions.into_iter().map(|p| p - 1).collect();
 
-            for &pos in positions.iter() {
-                if self.current_guess[pos].is_some() {
-                    println!("Letter {} is already occupied", pos + 1);
-                }
+            if let Some(pos) = positions.iter().find(|&&pos| self.current_guess[pos].is_some()) {
+                println!("Letter {} is already occupied", pos + 1);
+                continue;
             }
 
             return Ok((letter, positions));
@@ -224,8 +223,8 @@ impl Game {
         
         self.available_words.retain(|word| {
             let mut potential_additions = vec![vec![]; self.args.letters as usize];
-            for (potential_letter_list, (word_letter, guess_letter)) in potential_additions
-                .iter_mut()
+            for ((potential_place_additions, potential_place_letters), (word_letter, guess_letter)) in (potential_additions
+                .iter_mut().zip(potential_letters.iter()))
                 .zip(word.chars().zip(self.current_guess.iter()))
             {
                 if self.not_present.contains(&word_letter) {
@@ -237,17 +236,14 @@ impl Game {
                             return false;
                         }
                     }
-                    None => {
-                        if !potential_letter_list.contains(&word_letter) {
-                            potential_letter_list.push(word_letter);
-                        }
-                    }
+                    None if potential_place_letters.len() < 26 => potential_place_additions.push(word_letter),
+                    _ => {}
                 }
             }
-            for (addition, potential_letters) in potential_additions.into_iter().zip(potential_letters.iter_mut()) {
-                for add_char in addition {
-                    if !potential_letters.contains(&add_char) {
-                        potential_letters.push(add_char);
+            for (potential_place_additions, potential_place_letters) in potential_additions.into_iter().zip(potential_letters.iter_mut()) {
+                for letter_addition in potential_place_additions {
+                    if !potential_place_letters.contains(&letter_addition) {
+                        potential_place_letters.push(letter_addition);
                     }
                 }
             }
@@ -279,7 +275,7 @@ impl Game {
             let (letter, positions) = self.read_guess(&used)?;
             self.mark_result(letter, positions);
     
-            let potential_letters = self.prune_words();
+        let potential_letters = self.prune_words();
             self.fill_certain_letters(potential_letters);
     
             // check if there's only one or zero guesses left
