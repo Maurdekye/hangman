@@ -1,15 +1,12 @@
 #![feature(iterator_try_collect)]
 #![feature(file_create_new)]
 use std::{
-    collections::{hash_map::Entry, HashMap},
-    error::Error,
-    fs::File,
-    io::{stdin, stdout, BufRead, BufReader, BufWriter, Write},
-    path::PathBuf,
+    collections::{hash_map::Entry, HashMap}, error::Error, fs::File, io::{stdin, stdout, BufRead, BufReader, BufWriter, Write}, ops::ControlFlow, path::PathBuf
 };
 
 use clap::{value_parser, Parser};
 use regex::Regex;
+use ControlFlow::*;
 
 type Err = Box<dyn Error>;
 
@@ -35,11 +32,18 @@ fn load_words(args: &Args) -> Result<Vec<String>, Err> {
     }
 }
 
+struct HistoryFrame {
+    guess: Vec<Option<char>>,
+    not_present: Vec<char>,
+}
+
 struct Game {
     guess_pattern: Regex,
+    words: Vec<String>,
     available_words: Vec<String>,
     current_guess: Vec<Option<char>>,
     not_present: Vec<char>,
+    guess_history: Vec<HistoryFrame>,
     args: Args,
 }
 
@@ -47,14 +51,17 @@ impl Game {
     pub fn new(args: Args, words: Vec<String>) -> Result<Game, Err> {
 
         let letters = args.letters as usize;
+        let words: Vec<String> = words
+            .into_iter()
+            .filter(|word| word.len() == letters)
+            .collect();
         Ok(Game {
             guess_pattern: Regex::new(r"^([a-z])(( [0-9]+)*)$")?,
-            available_words: words
-                .into_iter()
-                .filter(|word| word.len() == letters)
-                .collect(),
+            available_words: words.clone(),
+            words,
             current_guess: vec![None; letters],
             not_present: vec![],
+            guess_history: vec![],
             args
         })
     }
@@ -139,22 +146,32 @@ impl Game {
         used
     }
 
-    fn read_guess(&self, used: &[char]) -> Result<(char, Vec<usize>), Err> {
+    fn read_guess(&mut self, used: &[char]) -> Result<ControlFlow<(char, Vec<usize>), HistoryFrame>, Err> {
         let letters = self.args.letters as usize;
         const HELPTEXT: &str = "Type your guess in the following format: <letter> [positions]
 example 1: the letter n appears at the start of the word: type `n 1`
 example 2: the letter e appears as the second and fourth letter: type `e 2 4`
-example 3: the letter g does not appear in the word: type `g`";
+example 3: the letter g does not appear in the word: type `g`
+Type `undo` to undo the last input";
         loop {
             print!("Type the letter you guessed, and if/where it appears in the word (hit enter for help): ");
             stdout().flush()?;
             let mut guess_raw = String::new();
             stdin().read_line(&mut guess_raw)?;
-            guess_raw = guess_raw.trim().to_string();
+            guess_raw = guess_raw.trim().to_lowercase().to_string();
 
             if guess_raw.is_empty() {
                 println!("{HELPTEXT}");
                 continue;
+            }
+
+            if guess_raw == "undo" {
+                let Some(last_frame) = self.guess_history.pop() else {
+                    println!("Nothing to undo!");
+                    continue;
+                };
+
+                return Ok(Continue(last_frame));
             }
 
             let Some(captures) = self.guess_pattern.captures(&guess_raw) else {
@@ -173,7 +190,7 @@ example 3: the letter g does not appear in the word: type `g`";
             let raw_positions = captures.get(2).unwrap();
 
             if raw_positions.is_empty() {
-                return Ok((letter, vec![]));
+                return Ok(Break((letter, vec![])));
             }
 
             let positions: Vec<usize> = raw_positions
@@ -195,11 +212,16 @@ example 3: the letter g does not appear in the word: type `g`";
                 continue;
             }
 
-            return Ok((letter, positions));
+            return Ok(Break((letter, positions)));
         };
     }
 
     fn mark_result(&mut self, letter: char, positions: Vec<usize>) {
+        self.guess_history.push(HistoryFrame {
+            guess: self.current_guess.clone(),
+            not_present: self.not_present.clone()
+        });
+
         if positions.is_empty() {
             println!("Letter {letter} is not in the word");
             self.not_present.push(letter);
@@ -272,10 +294,19 @@ example 3: the letter g does not appear in the word: type `g`";
     
             println!();
     
-            let (letter, positions) = self.read_guess(&used)?;
-            self.mark_result(letter, positions);
-    
-        let potential_letters = self.prune_words();
+
+            match self.read_guess(&used)? {
+                Break((letter, positions)) => {
+                    self.mark_result(letter, positions);
+                }
+                Continue(frame) => {
+                    self.current_guess = frame.guess;
+                    self.not_present = frame.not_present;
+                    self.available_words = self.words.clone();
+                }
+            }
+
+            let potential_letters = self.prune_words();
             self.fill_certain_letters(potential_letters);
     
             // check if there's only one or zero guesses left
