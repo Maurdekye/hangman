@@ -1,10 +1,16 @@
 #![feature(iterator_try_collect)]
 #![feature(file_create_new)]
 use std::{
-    collections::{hash_map::Entry, HashMap}, error::Error, fs::File, io::{stdin, stdout, BufRead, BufReader, BufWriter, Write}, ops::ControlFlow, path::PathBuf
+    collections::{hash_map::Entry, HashMap},
+    error::Error,
+    fs::File,
+    io::{stdin, stdout, BufRead, BufReader, BufWriter, Write},
+    num::ParseIntError,
+    ops::ControlFlow,
+    path::PathBuf,
 };
 
-use clap::{value_parser, Parser};
+use clap::{ArgAction, Parser, Subcommand};
 use regex::Regex;
 use ControlFlow::*;
 
@@ -44,33 +50,30 @@ struct Game {
     current_guess: Vec<Option<char>>,
     not_present: Vec<char>,
     guess_history: Vec<HistoryFrame>,
-    args: Args,
+    args: PlayArgs,
 }
 
 impl Game {
-    pub fn new(args: Args, words: Vec<String>) -> Result<Game, Err> {
-
-        let letters = args.letters as usize;
+    pub fn new(args: PlayArgs, words: Vec<String>) -> Result<Game, Err> {
         let words: Vec<String> = words
             .into_iter()
-            .filter(|word| word.len() == letters)
+            .filter(|word| word.len() == args.letters)
             .collect();
         Ok(Game {
             guess_pattern: Regex::new(r"^([a-z])(( [0-9]+)*)$")?,
             available_words: words.clone(),
             words,
-            current_guess: vec![None; letters],
+            current_guess: vec![None; args.letters],
             not_present: vec![],
             guess_history: vec![],
-            args
+            args,
         })
     }
 
     fn print_stats(&self) {
         println!(
             "current guess: {}",
-            self
-                .current_guess
+            self.current_guess
                 .iter()
                 .map(|letter| match letter {
                     None => "_".to_string(),
@@ -82,8 +85,7 @@ impl Game {
         if !self.not_present.is_empty() {
             println!(
                 "letters not present: {}",
-                self
-                    .not_present
+                self.not_present
                     .iter()
                     .cloned()
                     .map(String::from)
@@ -115,16 +117,19 @@ impl Game {
         return sorted_counts;
     }
 
-    fn show_scores_or_guesses(&self) -> Vec<char> {
-        let used: Vec<_> = self
-            .current_guess
+    fn used_letters(&self) -> Vec<char> {
+        self.current_guess
             .iter()
             .filter_map(|l| l.as_ref())
             .chain(self.not_present.iter())
             .cloned()
-            .collect();
+            .collect()
+    }
 
-        if self.available_words.len() <= self.args.display_guesses_threshold as usize {
+    fn show_scores_or_guesses(&self) -> Vec<char> {
+        let used = self.used_letters();
+
+        if self.available_words.len() <= self.args.display_guesses_threshold {
             println!("Possibilities:");
 
             for word in self.available_words.iter() {
@@ -133,11 +138,11 @@ impl Game {
         }
 
         let letter_scores = self.compute_letter_scores(&used);
-        
+
         println!("Top {} guesses:", self.args.num_suggestions);
         for (i, (letter, score)) in letter_scores
             .into_iter()
-            .take(self.args.num_suggestions as usize)
+            .take(self.args.num_suggestions)
             .enumerate()
         {
             println!("{}. {letter}: {score}", i + 1);
@@ -146,8 +151,10 @@ impl Game {
         used
     }
 
-    fn read_guess(&mut self, used: &[char]) -> Result<ControlFlow<(char, Vec<usize>), HistoryFrame>, Err> {
-        let letters = self.args.letters as usize;
+    fn read_guess(
+        &mut self,
+        used: &[char],
+    ) -> Result<ControlFlow<(char, Vec<usize>), HistoryFrame>, Err> {
         const HELPTEXT: &str = "Type your guess in the following format: <letter> [positions]
 example 1: the letter n appears at the start of the word: type `n 1`
 example 2: the letter e appears as the second and fourth letter: type `e 2 4`
@@ -200,26 +207,29 @@ Type `undo` to undo the last input";
                 .map(|t| t.parse().unwrap())
                 .collect();
 
-            if positions.iter().any(|&p| p == 0 || p > letters) {
+            if positions.iter().any(|&p| p == 0 || p > self.args.letters) {
                 println!("Positions provided are invalid letter indicies");
                 continue;
             }
 
             let positions: Vec<_> = positions.into_iter().map(|p| p - 1).collect();
 
-            if let Some(pos) = positions.iter().find(|&&pos| self.current_guess[pos].is_some()) {
+            if let Some(pos) = positions
+                .iter()
+                .find(|&&pos| self.current_guess[pos].is_some())
+            {
                 println!("Letter {} is already occupied", pos + 1);
                 continue;
             }
 
             return Ok(Break((letter, positions)));
-        };
+        }
     }
 
     fn mark_result(&mut self, letter: char, positions: Vec<usize>) {
         self.guess_history.push(HistoryFrame {
             guess: self.current_guess.clone(),
-            not_present: self.not_present.clone()
+            not_present: self.not_present.clone(),
         });
 
         if positions.is_empty() {
@@ -241,12 +251,14 @@ Type `undo` to undo the last input";
     }
 
     fn prune_words(&mut self) -> Vec<Vec<char>> {
-        let mut potential_letters = vec![vec![]; self.args.letters as usize];
-        
+        let mut potential_letters = vec![vec![]; self.args.letters];
+
         self.available_words.retain(|word| {
-            let mut potential_additions = vec![vec![]; self.args.letters as usize];
-            for ((potential_place_additions, potential_place_letters), (word_letter, guess_letter)) in (potential_additions
-                .iter_mut().zip(potential_letters.iter()))
+            let mut potential_additions = vec![vec![]; self.args.letters];
+            for (
+                (potential_place_additions, potential_place_letters),
+                (word_letter, guess_letter),
+            ) in (potential_additions.iter_mut().zip(potential_letters.iter()))
                 .zip(word.chars().zip(self.current_guess.iter()))
             {
                 if self.not_present.contains(&word_letter) {
@@ -258,11 +270,16 @@ Type `undo` to undo the last input";
                             return false;
                         }
                     }
-                    None if potential_place_letters.len() < 26 => potential_place_additions.push(word_letter),
+                    None if potential_place_letters.len() < 26 => {
+                        potential_place_additions.push(word_letter)
+                    }
                     _ => {}
                 }
             }
-            for (potential_place_additions, potential_place_letters) in potential_additions.into_iter().zip(potential_letters.iter_mut()) {
+            for (potential_place_additions, potential_place_letters) in potential_additions
+                .into_iter()
+                .zip(potential_letters.iter_mut())
+            {
                 for letter_addition in potential_place_additions {
                     if !potential_place_letters.contains(&letter_addition) {
                         potential_place_letters.push(letter_addition);
@@ -275,8 +292,7 @@ Type `undo` to undo the last input";
     }
 
     fn fill_certain_letters(&mut self, potential_letters: Vec<Vec<char>>) {
-        for (guess_letter, potential_letter) in
-            self.current_guess.iter_mut().zip(potential_letters)
+        for (guess_letter, potential_letter) in self.current_guess.iter_mut().zip(potential_letters)
         {
             if let (None, &[letter]) = (&guess_letter, &potential_letter[..]) {
                 *guess_letter = Some(letter);
@@ -287,13 +303,12 @@ Type `undo` to undo the last input";
     pub fn play(&mut self) -> Result<String, Err> {
         loop {
             self.print_stats();
-            
+
             println!();
-    
+
             let used = self.show_scores_or_guesses();
-    
+
             println!();
-    
 
             match self.read_guess(&used)? {
                 Break((letter, positions)) => {
@@ -308,7 +323,7 @@ Type `undo` to undo the last input";
 
             let potential_letters = self.prune_words();
             self.fill_certain_letters(potential_letters);
-    
+
             // check if there's only one or zero guesses left
             match &self.available_words[..] {
                 [word] => {
@@ -321,57 +336,156 @@ Type `undo` to undo the last input";
             }
         }
     }
+
+    pub fn simulate(words: Vec<String>, word: String) -> Result<SimResults, Err> {
+        let mut game = Self::new(
+            PlayArgs {
+                letters: word.len(),
+                num_suggestions: 0,
+                display_guesses_threshold: 0,
+            },
+            words,
+        )?;
+        let mut mistakes = 0;
+        loop {
+            let used = game.used_letters();
+            let scores = game.compute_letter_scores(&used);
+            let letter = scores[0].0; // simulate guess
+            let positions: Vec<_> = word
+                .chars()
+                .enumerate()
+                .filter_map(|(i, c)| (c == letter).then_some(i))
+                .collect(); // simulate receiving the result of the guess
+            if positions.is_empty() {
+                mistakes += 1;
+            }
+            game.mark_result(letter, positions);
+            let potential_letters = game.prune_words();
+            game.fill_certain_letters(potential_letters);
+            match &game.available_words[..] {
+                [single] if single == &word => {
+                    return Ok(SimResults {
+                        history: game.guess_history,
+                        mistakes,
+                    })
+                }
+                [] => Err("No words left")?,
+                [single] => Err(format!("Final result '{single}' is not the correct word"))?,
+                _ => {}
+            }
+        }
+    }
+}
+
+struct SimResults {
+    history: Vec<HistoryFrame>,
+    mistakes: usize,
 }
 
 #[derive(Parser)]
 struct Args {
-    #[clap(
-        value_parser = value_parser!(u32).range(1..),
-        help = "Number of letters in the word being guessed", 
-    )]
-    letters: u32,
-
-    #[clap(
-        short = 'f',
-        long,
-        default_value = "./words.txt",
-        help = "Name of the file to cache and load words from"
-    )]
+    /// Name of the file to cache and load words from
+    #[clap(short = 'f', long, default_value = "./words.txt")]
     words_file: PathBuf,
 
+    /// Url to load words from if not downloaded
     #[clap(
         short = 's',
         long,
-        default_value = "https://www.mit.edu/~ecprice/wordlist.100000",
-        help = "Url to load words from if not downloaded"
+        default_value = "https://www.mit.edu/~ecprice/wordlist.100000"
     )]
     word_source: String,
 
-    #[clap(
-        short, 
-        long, 
-        default_value_t = 5, 
-        value_parser = value_parser!(u32).range(1..),
-        help = "Number of top letter suggestions to display", 
-    )]
-    num_suggestions: u32,
+    #[command(subcommand)]
+    command: Command,
+}
 
-    #[clap(
-        short,
-        long,
-        default_value_t = 10,
-        value_parser = value_parser!(u32).range(1..),
-        help = "Show possible words to guess once the total number of possible words goes below this threshold"
-    )]
-    display_guesses_threshold: u32,
+#[derive(Subcommand)]
+enum Command {
+    /// Play hangman with someone
+    Play(PlayArgs),
+
+    /// Simulate playing hangman with a specific word, and show statistics of the result
+    Simulate(SimulateArgs),
+}
+
+#[derive(Parser)]
+struct SimulateArgs {
+    /// Word to simulate
+    word: String,
+
+    /// Show detailed simulation results
+    #[clap(short, long, action = ArgAction::SetTrue)]
+    detailed: bool,
+}
+
+fn nonzero(arg: &str) -> Result<usize, String> {
+    let val: usize = arg.parse().map_err(|e: ParseIntError| e.to_string())?;
+    if val == 0 {
+        Err("Value must be at least 1!")?;
+    }
+    Ok(val)
+}
+
+#[derive(Parser)]
+struct PlayArgs {
+    /// Number of letters in the word being guessed
+    #[clap(value_parser = nonzero)]
+    letters: usize,
+
+    /// Number of top letter suggestions to display
+    #[clap(short, long, default_value_t = 5, value_parser = nonzero)]
+    num_suggestions: usize,
+
+    /// Show possible words to guess once the total number of possible words goes below this threshold
+    #[clap(short, long, default_value_t = 10, value_parser = nonzero)]
+    display_guesses_threshold: usize,
 }
 
 fn main() -> Result<(), Err> {
     let args = Args::parse();
     let words = load_words(&args)?;
     println!("Loaded {} words", words.len());
-    let mut game = Game::new(args, words)?;
-    let final_guess = game.play()?;
-    println!("Final guess: {final_guess}");
+
+    match args.command {
+        Command::Play(args) => {
+            let mut game = Game::new(args, words)?;
+            let final_guess = game.play()?;
+            println!("Final guess: {final_guess}");
+        }
+        Command::Simulate(args) => {
+            let results = Game::simulate(words, args.word)?;
+            println!(
+                "Took {} guesses to guess the word, making {} total mistakes",
+                results.history.len(),
+                results.mistakes
+            );
+
+            if args.detailed {
+                for (i, frame) in (1..).zip(results.history) {
+                    println!(
+                        "Turn {i}: {}, [{}]",
+                        frame
+                            .guess
+                            .iter()
+                            .map(|letter| match letter {
+                                None => "_".to_string(),
+                                Some(letter) => (*letter).into(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        frame
+                            .not_present
+                            .iter()
+                            .cloned()
+                            .map(String::from)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                }
+            }
+        }
+    }
+
     Ok(())
 }
