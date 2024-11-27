@@ -226,11 +226,15 @@ Type `undo` to undo the last input";
         }
     }
 
-    fn mark_result(&mut self, letter: char, positions: Vec<usize>) {
+    fn push_history(&mut self) {
         self.guess_history.push(HistoryFrame {
             guess: self.current_guess.clone(),
             not_present: self.not_present.clone(),
         });
+    }
+
+    fn mark_result(&mut self, letter: char, positions: Vec<usize>) {
+        self.push_history();
 
         if positions.is_empty() {
             println!("Letter {letter} is not in the word");
@@ -347,6 +351,7 @@ Type `undo` to undo the last input";
             words,
         )?;
         let mut mistakes = 0;
+        let mut guesses = Vec::new();
         loop {
             let used = game.used_letters();
             let scores = game.compute_letter_scores(&used);
@@ -359,15 +364,18 @@ Type `undo` to undo the last input";
             if positions.is_empty() {
                 mistakes += 1;
             }
+            guesses.push(letter);
             game.mark_result(letter, positions);
             let potential_letters = game.prune_words();
             game.fill_certain_letters(potential_letters);
             match &game.available_words[..] {
                 [single] if single == &word => {
+                    game.push_history();
                     return Ok(SimResults {
                         history: game.guess_history,
+                        guesses,
                         mistakes,
-                    })
+                    });
                 }
                 [] => Err("No words left")?,
                 [single] => Err(format!("Final result '{single}' is not the correct word"))?,
@@ -379,6 +387,7 @@ Type `undo` to undo the last input";
 
 struct SimResults {
     history: Vec<HistoryFrame>,
+    guesses: Vec<char>,
     mistakes: usize,
 }
 
@@ -462,9 +471,9 @@ fn main() -> Result<(), Err> {
             );
 
             if args.detailed {
-                for (i, frame) in (1..).zip(results.history) {
+                for ((i, frame), guess) in (1..).zip(results.history).zip(results.guesses) {
                     println!(
-                        "Turn {i}: {}, [{}]",
+                        "Turn {i}: {}, [{}], guessed {guess}",
                         frame
                             .guess
                             .iter()
