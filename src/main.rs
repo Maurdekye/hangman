@@ -7,11 +7,15 @@ use std::{
     io::{stdin, stdout, BufRead, BufReader, BufWriter, Write},
     num::ParseIntError,
     ops::ControlFlow,
+    panic::catch_unwind,
     path::PathBuf,
+    time::Duration,
 };
 
 use clap::{ArgAction, Parser, Subcommand};
+use progress_observer::{reprint, Observer};
 use regex::Regex;
+use serde::Serialize;
 use ControlFlow::*;
 
 type Err = Box<dyn Error>;
@@ -42,7 +46,19 @@ struct HangmanPlayer {
     available_words: Vec<String>,
     current_guess: Vec<Option<char>>,
     not_present: Vec<char>,
+    used_letters: Vec<char>,
     guess_history: Vec<HistoryFrame>,
+}
+
+impl std::fmt::Debug for HangmanPlayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HangmanPlayer")
+            .field("available_words.len()", &self.available_words.len())
+            .field("current_guess", &self.current_guess)
+            .field("not_present", &self.not_present)
+            // .field("guess_history", &self.guess_history)
+            .finish()
+    }
 }
 
 impl HangmanPlayer {
@@ -55,18 +71,19 @@ impl HangmanPlayer {
             available_words: words.clone(),
             current_guess: vec![None; word_length],
             not_present: vec![],
+            used_letters: vec![],
             guess_history: vec![],
         })
     }
 
-    fn compute_letter_scores(&self, used: &[char]) -> Vec<(char, usize)> {
+    fn compute_letter_scores(&self) -> Vec<(char, usize)> {
         let mut counts: HashMap<_, _> = ('a'..='z')
-            .filter(|l| !used.contains(&l))
+            .filter(|l| !self.used_letters.contains(&l))
             .map(|l| (l, 0usize))
             .collect();
         for word in self.available_words.iter() {
             let mut unique_letters: Vec<_> = word.chars().collect();
-            unique_letters.sort_unstable();
+            unique_letters.sort();
             unique_letters.dedup();
             for letter in unique_letters {
                 if let Entry::Occupied(mut entry) = counts.entry(letter) {
@@ -75,18 +92,9 @@ impl HangmanPlayer {
             }
         }
         let mut sorted_counts: Vec<_> = counts.into_iter().collect();
-        sorted_counts.sort_unstable_by(|(_, a), (_, b)| b.cmp(a));
+        sorted_counts.sort_by(|(_, a), (_, b)| b.cmp(a));
 
         return sorted_counts;
-    }
-
-    fn used_letters(&self) -> Vec<char> {
-        self.current_guess
-            .iter()
-            .filter_map(|l| l.as_ref())
-            .chain(self.not_present.iter())
-            .cloned()
-            .collect()
     }
 
     fn push_history(&mut self) {
@@ -99,6 +107,7 @@ impl HangmanPlayer {
     fn mark_result(&mut self, letter: char, positions: Vec<usize>) {
         self.push_history();
 
+        self.used_letters.push(letter);
         if positions.is_empty() {
             self.not_present.push(letter);
         } else {
@@ -306,13 +315,12 @@ Type `undo` to undo the last input";
 
             println!();
 
-            let used = self.player.used_letters();
-            let letter_scores = self.player.compute_letter_scores(&used);
+            let letter_scores = self.player.compute_letter_scores();
             self.show_scores_guesses_possibilities(&letter_scores);
 
             println!();
 
-            match self.read_guess(&used)? {
+            match self.read_guess(&self.player.used_letters)? {
                 Break((letter, positions)) => {
                     if positions.is_empty() {
                         println!("Letter {letter} is not in the word");
@@ -357,8 +365,7 @@ fn simulate(words: Vec<String>, word: String) -> Result<SimResults, Err> {
     let mut guesses = Vec::new();
 
     loop {
-        let used = player.used_letters();
-        let scores = player.compute_letter_scores(&used);
+        let scores = player.compute_letter_scores();
         let letter = scores[0].0; // simulate guess
         let positions: Vec<_> = word
             .chars()
@@ -389,6 +396,7 @@ fn simulate(words: Vec<String>, word: String) -> Result<SimResults, Err> {
 
 struct Undo;
 
+#[derive(Debug)]
 struct HistoryFrame {
     guess: Vec<Option<char>>,
     not_present: Vec<char>,
@@ -398,6 +406,14 @@ struct SimResults {
     history: Vec<HistoryFrame>,
     guesses: Vec<char>,
     mistakes: usize,
+}
+
+fn nonzero(arg: &str) -> Result<usize, String> {
+    let val: usize = arg.parse().map_err(|e: ParseIntError| e.to_string())?;
+    if val == 0 {
+        Err("Value must be at least 1!")?;
+    }
+    Ok(val)
 }
 
 #[derive(Parser)]
@@ -425,24 +441,9 @@ enum Command {
 
     /// Simulate playing hangman with a specific word, and show statistics of the result
     Simulate(SimulateArgs),
-}
 
-#[derive(Parser)]
-struct SimulateArgs {
-    /// Word to simulate
-    word: String,
-
-    /// Show detailed simulation results
-    #[clap(short, long, action = ArgAction::SetTrue)]
-    detailed: bool,
-}
-
-fn nonzero(arg: &str) -> Result<usize, String> {
-    let val: usize = arg.parse().map_err(|e: ParseIntError| e.to_string())?;
-    if val == 0 {
-        Err("Value must be at least 1!")?;
-    }
-    Ok(val)
+    /// Simulate all words in the dictionary, storing the results in a csv file
+    BulkSim(BulkSimArgs),
 }
 
 #[derive(Parser)]
@@ -459,6 +460,26 @@ struct PlayArgs {
     #[clap(short, long, default_value_t = 10, value_parser = nonzero)]
     display_guesses_threshold: usize,
 }
+
+#[derive(Parser)]
+struct SimulateArgs {
+    /// Word to simulate
+    word: String,
+
+    /// Show detailed simulation results
+    #[clap(short, long, action = ArgAction::SetTrue)]
+    detailed: bool,
+}
+
+#[derive(Parser)]
+struct BulkSimArgs {
+    /// Output file
+    #[clap(short, long, default_value = "scores.csv")]
+    out: PathBuf,
+}
+
+#[derive(Serialize)]
+struct SimRecord(String, usize, usize);
 
 fn main() -> Result<(), Err> {
     let args = Args::parse();
@@ -501,6 +522,25 @@ fn main() -> Result<(), Err> {
                             .join(" ")
                     );
                 }
+            }
+        }
+        Command::BulkSim(args) => {
+            let mut writer = csv::WriterBuilder::new().from_path(args.out)?;
+            for (i, (word, log)) in words
+                .iter()
+                .zip(Observer::new(Duration::from_secs_f32(0.1)))
+                .enumerate()
+            {
+                if log {
+                    reprint!("{}/{}", i, words.len());
+                }
+                let SimResults {
+                    history, mistakes, ..
+                } = catch_unwind(|| simulate(words.clone(), word.clone()))
+                    .map_err(|_| println!("Failed on '{word}'"))
+                    .unwrap()?;
+                let row = SimRecord(word.clone(), history.len(), mistakes);
+                writer.serialize(row)?;
             }
         }
     }
