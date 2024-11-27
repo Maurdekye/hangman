@@ -7,8 +7,9 @@ use std::{
     io::{stdin, stdout, BufRead, BufReader, BufWriter, Write},
     num::ParseIntError,
     ops::ControlFlow,
-    panic::catch_unwind,
     path::PathBuf,
+    sync::mpsc::channel,
+    thread,
     time::Duration,
 };
 
@@ -16,6 +17,7 @@ use clap::{ArgAction, Parser, Subcommand};
 use progress_observer::{reprint, Observer};
 use regex::Regex;
 use serde::Serialize;
+use threadpool::ThreadPool;
 use ControlFlow::*;
 
 type Err = Box<dyn Error>;
@@ -525,23 +527,51 @@ fn main() -> Result<(), Err> {
             }
         }
         Command::BulkSim(args) => {
-            let mut writer = csv::WriterBuilder::new().from_path(args.out)?;
-            for (i, (word, log)) in words
-                .iter()
-                .zip(Observer::new(Duration::from_secs_f32(0.1)))
-                .enumerate()
-            {
-                if log {
-                    reprint!("{}/{}", i, words.len());
+            let (send, recv) = channel();
+
+            thread::scope(|s| -> Result<(), Err> {
+                s.spawn({
+                    let words = words.clone();
+                    let send = send.clone();
+                    move || {
+                        let pool = ThreadPool::new(8);
+                        for word in words.iter() {
+                            let word = word.clone();
+                            let words = words.clone();
+                            let send = send.clone();
+                            pool.execute(move || {
+                                send.send((word.clone(), simulate(words, word).unwrap()))
+                                    .unwrap()
+                            });
+                        }
+                    }
+                });
+
+                let mut writer = csv::WriterBuilder::new().from_path(args.out)?;
+                for (
+                    i,
+                    (
+                        (
+                            word,
+                            SimResults {
+                                history, mistakes, ..
+                            },
+                        ),
+                        log,
+                    ),
+                ) in (recv.into_iter().take(words.len()))
+                    .zip(Observer::new(Duration::from_secs_f32(0.1)))
+                    .enumerate()
+                {
+                    if log {
+                        reprint!("{}/{}", i, words.len());
+                    }
+                    let row = SimRecord(word.clone(), history.len(), mistakes);
+                    writer.serialize(row)?;
                 }
-                let SimResults {
-                    history, mistakes, ..
-                } = catch_unwind(|| simulate(words.clone(), word.clone()))
-                    .map_err(|_| println!("Failed on '{word}'"))
-                    .unwrap()?;
-                let row = SimRecord(word.clone(), history.len(), mistakes);
-                writer.serialize(row)?;
-            }
+                Ok(())
+            })?;
+            println!("Done");
         }
     }
 

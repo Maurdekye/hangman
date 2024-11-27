@@ -10,3 +10,4 @@ progress-observer = "3.2.0"
 regex = "1.11.1"
 reqwest = { version = "0.12.9", features = ["blocking"] }
 serde = { version = "1.0.215", features = ["derive"] }
+threadpool = "1.8.1"
