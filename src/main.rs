@@ -38,62 +38,25 @@ fn load_words(args: &Args) -> Result<Vec<String>, Err> {
     }
 }
 
-struct HistoryFrame {
-    guess: Vec<Option<char>>,
-    not_present: Vec<char>,
-}
-
-struct Game {
-    guess_pattern: Regex,
-    words: Vec<String>,
+struct HangmanPlayer {
     available_words: Vec<String>,
     current_guess: Vec<Option<char>>,
     not_present: Vec<char>,
     guess_history: Vec<HistoryFrame>,
-    args: PlayArgs,
 }
 
-impl Game {
-    pub fn new(args: PlayArgs, words: Vec<String>) -> Result<Game, Err> {
+impl HangmanPlayer {
+    pub fn new(words: Vec<String>, word_length: usize) -> Result<HangmanPlayer, Err> {
         let words: Vec<String> = words
             .into_iter()
-            .filter(|word| word.len() == args.letters)
+            .filter(|word| word.len() == word_length)
             .collect();
-        Ok(Game {
-            guess_pattern: Regex::new(r"^([a-z])(( [0-9]+)*)$")?,
+        Ok(HangmanPlayer {
             available_words: words.clone(),
-            words,
-            current_guess: vec![None; args.letters],
+            current_guess: vec![None; word_length],
             not_present: vec![],
             guess_history: vec![],
-            args,
         })
-    }
-
-    fn print_stats(&self) {
-        println!(
-            "current guess: {}",
-            self.current_guess
-                .iter()
-                .map(|letter| match letter {
-                    None => "_".to_string(),
-                    Some(letter) => (*letter).into(),
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        if !self.not_present.is_empty() {
-            println!(
-                "letters not present: {}",
-                self.not_present
-                    .iter()
-                    .cloned()
-                    .map(String::from)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )
-        }
-        println!("{} possible words", self.available_words.len());
     }
 
     fn compute_letter_scores(&self, used: &[char]) -> Vec<(char, usize)> {
@@ -126,106 +89,6 @@ impl Game {
             .collect()
     }
 
-    fn show_scores_or_guesses(&self) -> Vec<char> {
-        let used = self.used_letters();
-
-        if self.available_words.len() <= self.args.display_guesses_threshold {
-            println!("Possibilities:");
-
-            for word in self.available_words.iter() {
-                println!("{word}");
-            }
-        }
-
-        let letter_scores = self.compute_letter_scores(&used);
-
-        println!("Top {} guesses:", self.args.num_suggestions);
-        for (i, (letter, score)) in letter_scores
-            .into_iter()
-            .take(self.args.num_suggestions)
-            .enumerate()
-        {
-            println!("{}. {letter}: {score}", i + 1);
-        }
-
-        used
-    }
-
-    fn read_guess(
-        &mut self,
-        used: &[char],
-    ) -> Result<ControlFlow<(char, Vec<usize>), HistoryFrame>, Err> {
-        const HELPTEXT: &str = "Type your guess in the following format: <letter> [positions]
-example 1: the letter n appears at the start of the word: type `n 1`
-example 2: the letter e appears as the second and fourth letter: type `e 2 4`
-example 3: the letter g does not appear in the word: type `g`
-Type `undo` to undo the last input";
-        loop {
-            print!("Type the letter you guessed, and if/where it appears in the word (hit enter for help): ");
-            stdout().flush()?;
-            let mut guess_raw = String::new();
-            stdin().read_line(&mut guess_raw)?;
-            guess_raw = guess_raw.trim().to_lowercase().to_string();
-
-            if guess_raw.is_empty() {
-                println!("{HELPTEXT}");
-                continue;
-            }
-
-            if guess_raw == "undo" {
-                let Some(last_frame) = self.guess_history.pop() else {
-                    println!("Nothing to undo!");
-                    continue;
-                };
-
-                return Ok(Continue(last_frame));
-            }
-
-            let Some(captures) = self.guess_pattern.captures(&guess_raw) else {
-                println!("Invalid guess format");
-                println!("{HELPTEXT}");
-                continue;
-            };
-
-            let letter = captures.get(1).unwrap().as_str().chars().next().unwrap();
-
-            if used.contains(&&letter) {
-                println!("{letter} has already been guessed");
-                continue;
-            }
-
-            let raw_positions = captures.get(2).unwrap();
-
-            if raw_positions.is_empty() {
-                return Ok(Break((letter, vec![])));
-            }
-
-            let positions: Vec<usize> = raw_positions
-                .as_str()
-                .trim()
-                .split(" ")
-                .map(|t| t.parse().unwrap())
-                .collect();
-
-            if positions.iter().any(|&p| p == 0 || p > self.args.letters) {
-                println!("Positions provided are invalid letter indicies");
-                continue;
-            }
-
-            let positions: Vec<_> = positions.into_iter().map(|p| p - 1).collect();
-
-            if let Some(pos) = positions
-                .iter()
-                .find(|&&pos| self.current_guess[pos].is_some())
-            {
-                println!("Letter {} is already occupied", pos + 1);
-                continue;
-            }
-
-            return Ok(Break((letter, positions)));
-        }
-    }
-
     fn push_history(&mut self) {
         self.guess_history.push(HistoryFrame {
             guess: self.current_guess.clone(),
@@ -237,17 +100,8 @@ Type `undo` to undo the last input";
         self.push_history();
 
         if positions.is_empty() {
-            println!("Letter {letter} is not in the word");
             self.not_present.push(letter);
         } else {
-            println!(
-                "Letter {letter} is at position(s) {} of the word",
-                positions
-                    .iter()
-                    .map(|p| (p + 1).to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
             for pos in positions {
                 self.current_guess[pos] = Some(letter);
             }
@@ -255,10 +109,10 @@ Type `undo` to undo the last input";
     }
 
     fn prune_words(&mut self) -> Vec<Vec<char>> {
-        let mut potential_letters = vec![vec![]; self.args.letters];
+        let mut potential_letters = vec![vec![]; self.current_guess.len()];
 
         self.available_words.retain(|word| {
-            let mut potential_additions = vec![vec![]; self.args.letters];
+            let mut potential_additions = vec![vec![]; self.current_guess.len()];
             for (
                 (potential_place_additions, potential_place_letters),
                 (word_letter, guess_letter),
@@ -304,32 +158,187 @@ Type `undo` to undo the last input";
         }
     }
 
+    fn prune_and_fill_certain_letters(&mut self) {
+        let potential_letters = self.prune_words();
+        self.fill_certain_letters(potential_letters);
+    }
+}
+
+struct PlayerUI {
+    player: HangmanPlayer,
+    args: PlayArgs,
+    guess_pattern: Regex,
+    original_word_list: Vec<String>,
+}
+
+impl PlayerUI {
+    pub fn new(player: HangmanPlayer, args: PlayArgs) -> PlayerUI {
+        PlayerUI {
+            original_word_list: player.available_words.clone(),
+            player,
+            args,
+            guess_pattern: Regex::new(r"^([a-z])(( [0-9]+)*)$").unwrap(),
+        }
+    }
+
+    fn print_stats(&self) {
+        println!(
+            "current guess: {}",
+            self.player
+                .current_guess
+                .iter()
+                .map(|letter| match letter {
+                    None => "_".to_string(),
+                    Some(letter) => (*letter).into(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        if !self.player.not_present.is_empty() {
+            println!(
+                "letters not present: {}",
+                self.player
+                    .not_present
+                    .iter()
+                    .cloned()
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        }
+        println!("{} possible words", self.player.available_words.len());
+    }
+
+    fn show_scores_guesses_possibilities(&self, letter_scores: &Vec<(char, usize)>) {
+        if self.player.available_words.len() <= self.args.display_guesses_threshold {
+            println!("Possibilities:");
+
+            for word in self.player.available_words.iter() {
+                println!("{word}");
+            }
+        }
+
+        println!("Top {} guesses:", self.args.num_suggestions);
+        for (i, (letter, score)) in letter_scores
+            .into_iter()
+            .take(self.args.num_suggestions)
+            .enumerate()
+        {
+            println!("{}. {letter}: {score}", i + 1);
+        }
+    }
+
+    fn read_guess(&self, used: &[char]) -> Result<ControlFlow<(char, Vec<usize>), Undo>, Err> {
+        const HELPTEXT: &str = "Type your guess in the following format: <letter> [positions]
+example 1: the letter n appears at the start of the word: type `n 1`
+example 2: the letter e appears as the second and fourth letter: type `e 2 4`
+example 3: the letter g does not appear in the word: type `g`
+Type `undo` to undo the last input";
+        loop {
+            print!("Type the letter you guessed, and if/where it appears in the word (hit enter for help): ");
+            stdout().flush()?;
+            let mut guess_raw = String::new();
+            stdin().read_line(&mut guess_raw)?;
+            guess_raw = guess_raw.trim().to_lowercase().to_string();
+
+            if guess_raw.is_empty() {
+                println!("{HELPTEXT}");
+                continue;
+            }
+
+            if guess_raw == "undo" {
+                if self.player.guess_history.is_empty() {
+                    println!("Nothing to undo!");
+                    continue;
+                }
+
+                return Ok(Continue(Undo));
+            }
+
+            let Some(captures) = self.guess_pattern.captures(&guess_raw) else {
+                println!("Invalid guess format");
+                println!("{HELPTEXT}");
+                continue;
+            };
+
+            let letter = captures.get(1).unwrap().as_str().chars().next().unwrap();
+
+            if used.contains(&&letter) {
+                println!("{letter} has already been guessed");
+                continue;
+            }
+
+            let raw_positions = captures.get(2).unwrap();
+
+            if raw_positions.is_empty() {
+                return Ok(Break((letter, vec![])));
+            }
+
+            let positions: Vec<usize> = raw_positions
+                .as_str()
+                .trim()
+                .split(" ")
+                .map(|t| t.parse().unwrap())
+                .collect();
+
+            if positions.iter().any(|&p| p == 0 || p > self.args.letters) {
+                println!("Positions provided are invalid letter indicies");
+                continue;
+            }
+
+            let positions: Vec<_> = positions.into_iter().map(|p| p - 1).collect();
+
+            if let Some(pos) = positions
+                .iter()
+                .find(|&&pos| self.player.current_guess[pos].is_some())
+            {
+                println!("Letter {} is already occupied", pos + 1);
+                continue;
+            }
+
+            return Ok(Break((letter, positions)));
+        }
+    }
+
     pub fn play(&mut self) -> Result<String, Err> {
         loop {
             self.print_stats();
 
             println!();
 
-            let used = self.show_scores_or_guesses();
+            let used = self.player.used_letters();
+            let letter_scores = self.player.compute_letter_scores(&used);
+            self.show_scores_guesses_possibilities(&letter_scores);
 
             println!();
 
             match self.read_guess(&used)? {
                 Break((letter, positions)) => {
-                    self.mark_result(letter, positions);
+                    if positions.is_empty() {
+                        println!("Letter {letter} is not in the word");
+                    } else {
+                        println!(
+                            "Letter {letter} is at position(s) {} of the word",
+                            positions
+                                .iter()
+                                .map(|p| (p + 1).to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                    self.player.mark_result(letter, positions);
                 }
-                Continue(frame) => {
-                    self.current_guess = frame.guess;
-                    self.not_present = frame.not_present;
-                    self.available_words = self.words.clone();
+                Continue(Undo) => {
+                    let frame = self.player.guess_history.pop().unwrap();
+                    self.player.current_guess = frame.guess;
+                    self.player.not_present = frame.not_present;
+                    self.player.available_words = self.original_word_list.clone();
                 }
             }
 
-            let potential_letters = self.prune_words();
-            self.fill_certain_letters(potential_letters);
+            self.player.prune_and_fill_certain_letters();
 
-            // check if there's only one or zero guesses left
-            match &self.available_words[..] {
+            match &self.player.available_words[..] {
                 [word] => {
                     return Ok(word.clone());
                 }
@@ -340,49 +349,49 @@ Type `undo` to undo the last input";
             }
         }
     }
+}
 
-    pub fn simulate(words: Vec<String>, word: String) -> Result<SimResults, Err> {
-        let mut game = Self::new(
-            PlayArgs {
-                letters: word.len(),
-                num_suggestions: 0,
-                display_guesses_threshold: 0,
-            },
-            words,
-        )?;
-        let mut mistakes = 0;
-        let mut guesses = Vec::new();
-        loop {
-            let used = game.used_letters();
-            let scores = game.compute_letter_scores(&used);
-            let letter = scores[0].0; // simulate guess
-            let positions: Vec<_> = word
-                .chars()
-                .enumerate()
-                .filter_map(|(i, c)| (c == letter).then_some(i))
-                .collect(); // simulate receiving the result of the guess
-            if positions.is_empty() {
-                mistakes += 1;
+fn simulate(words: Vec<String>, word: String) -> Result<SimResults, Err> {
+    let mut player = HangmanPlayer::new(words, word.len())?;
+    let mut mistakes = 0;
+    let mut guesses = Vec::new();
+
+    loop {
+        let used = player.used_letters();
+        let scores = player.compute_letter_scores(&used);
+        let letter = scores[0].0; // simulate guess
+        let positions: Vec<_> = word
+            .chars()
+            .enumerate()
+            .filter_map(|(i, c)| (c == letter).then_some(i))
+            .collect(); // simulate receiving the result of the guess
+        if positions.is_empty() {
+            mistakes += 1;
+        }
+        guesses.push(letter);
+        player.mark_result(letter, positions);
+        player.prune_and_fill_certain_letters();
+        match &player.available_words[..] {
+            [single] if single == &word => {
+                player.push_history();
+                return Ok(SimResults {
+                    history: player.guess_history,
+                    guesses,
+                    mistakes,
+                });
             }
-            guesses.push(letter);
-            game.mark_result(letter, positions);
-            let potential_letters = game.prune_words();
-            game.fill_certain_letters(potential_letters);
-            match &game.available_words[..] {
-                [single] if single == &word => {
-                    game.push_history();
-                    return Ok(SimResults {
-                        history: game.guess_history,
-                        guesses,
-                        mistakes,
-                    });
-                }
-                [] => Err("No words left")?,
-                [single] => Err(format!("Final result '{single}' is not the correct word"))?,
-                _ => {}
-            }
+            [] => Err("No words left")?,
+            [single] => Err(format!("Final result '{single}' is not the correct word"))?,
+            _ => {}
         }
     }
+}
+
+struct Undo;
+
+struct HistoryFrame {
+    guess: Vec<Option<char>>,
+    not_present: Vec<char>,
 }
 
 struct SimResults {
@@ -458,12 +467,12 @@ fn main() -> Result<(), Err> {
 
     match args.command {
         Command::Play(args) => {
-            let mut game = Game::new(args, words)?;
+            let mut game = PlayerUI::new(HangmanPlayer::new(words, args.letters)?, args);
             let final_guess = game.play()?;
             println!("Final guess: {final_guess}");
         }
         Command::Simulate(args) => {
-            let results = Game::simulate(words, args.word)?;
+            let results = simulate(words, args.word)?;
             println!(
                 "Took {} guesses to guess the word, making {} total mistakes",
                 results.history.len(),
